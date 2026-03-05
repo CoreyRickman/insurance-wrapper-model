@@ -92,26 +92,44 @@ with tabs[0]:
         results = {}
         summaries = []
 
-        if do_taxable:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                step_up = st.checkbox("Step-up at death", value=True, key="tx_stepup")
-            with c2:
-                death_age = st.number_input("Death age (for step-up)", value=90, step=1, key="tx_death_age")
-            with c3:
-                tlh = st.number_input("Tax-loss harvesting benefit (bps/yr)", value=0.0, key="tx_tlh")
+       if do_taxable:
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        step_up = st.checkbox("Step-up at death", value=True, key="tx_stepup")
+    with c2:
+        death_age = st.number_input("Death age (for step-up)", value=90, step=1, key="tx_death_age")
+    with c3:
+        tlh = st.number_input("Tax-loss harvesting benefit (bps/yr)", value=0.0, key="tx_tlh")
 
-            taxable_inputs = TaxableInputs(step_up_at_death=step_up, death_age=int(death_age), tlh_bps=float(tlh))
-            df_tax = run_taxable(policy, strategy, taxes, taxable_inputs, years=int(horizon_years))
-            results["Taxable"] = df_tax
-            summaries.append(summarize_path("Taxable", df_tax, "value_end", tax_col="tax_paid"))
+    taxable_inputs = TaxableInputs(step_up_at_death=step_up, death_age=int(death_age), tlh_bps=float(tlh))
+    df_tax = run_taxable(policy, strategy, taxes, taxable_inputs, years=int(horizon_years))
+    results["Taxable"] = df_tax
+
+    end_val = float(df_tax["value_end"].iloc[-1])
+    basis = float(df_tax["basis"].iloc[-1])
+
+    after_tax_exit, exit_tax = liquidate_taxable(end_val, basis, taxes)
+
+    summ = summarize_path("Taxable", df_tax, "value_end", tax_col="tax_paid")
+    summ["exit_tax_at_horizon"] = exit_tax
+    summ["ending_value_after_tax_exit"] = after_tax_exit
+    summaries.append(summ)
 
         if do_ppva:
-            st.write("PPVA settings are in the PPVA tab (defaults applied here).")
-            ppva_fees = FeeInputs(wrapper_fee_bps=75.0, fund_er_bps=50.0, admin_fee_annual=5000.0)
-            df_ppva = run_ppva_accum(policy, strategy, ppva_fees, years=int(horizon_years))
-            results["PPVA (accum)"] = df_ppva
-            summaries.append(summarize_path("PPVA (accum)", df_ppva, "value_end"))
+    st.write("PPVA settings are in the PPVA tab (defaults applied here).")
+    ppva_fees = FeeInputs(wrapper_fee_bps=75.0, fund_er_bps=50.0, admin_fee_annual=5000.0)
+    df_ppva = run_ppva_accum(policy, strategy, ppva_fees, years=int(horizon_years))
+    results["PPVA (accum)"] = df_ppva
+
+    end_val = float(df_ppva["value_end"].iloc[-1])
+    basis = float(df_ppva["basis"].iloc[-1])
+
+    after_tax_exit, exit_tax = liquidate_ppva(end_val, basis, taxes)
+
+    summ = summarize_path("PPVA (accum)", df_ppva, "value_end")
+    summ["exit_tax_at_horizon"] = exit_tax
+    summ["ending_value_after_tax_exit"] = after_tax_exit
+    summaries.append(summ)
 
         if do_ppli:
             default_curve = {65: 35, 75: 80, 85: 160, 95: 300}
@@ -138,18 +156,42 @@ with tabs[0]:
         st.session_state["results"] = results
         st.session_state["summary"] = pd.DataFrame(summaries)
 
-    if not st.session_state["summary"].empty:
-        st.dataframe(st.session_state["summary"], use_container_width=True)
+   if not st.session_state["summary"].empty:
+    summ = st.session_state["summary"].copy()
 
-        # quick visualization: ending values
-        st.bar_chart(st.session_state["summary"].set_index("scenario")["ending_value"])
+    # Add a few readable headline metrics
+    st.markdown("### Headline Results (After-Tax Exit Where Applicable)")
 
+    # formatted table for display
+    display = summ.copy()
+
+    money_cols = [
+        "ending_value",
+        "ending_value_after_tax_exit",
+        "total_cashflows",
+        "total_tax_paid",
+        "exit_tax_at_horizon",
+    ]
+    for c in money_cols:
+        if c in display.columns:
+            display[c] = display[c].map(lambda v: fmt_money(float(v)) if pd.notnull(v) else "")
+
+    st.dataframe(display, use_container_width=True)
+
+    # Prefer after-tax exit column if present
+    chart_col = "ending_value_after_tax_exit" if "ending_value_after_tax_exit" in summ.columns else "ending_value"
+    st.bar_chart(summ.set_index("scenario")[chart_col])
 with tabs[1]:
     st.subheader("Taxable schedule")
     df = st.session_state["results"].get("Taxable")
     if df is None:
         st.info("Run the model first.")
     else:
+        df_show = df.tail(24).copy()
+for c in ["value_start", "value_end", "basis", "tax_paid"]:
+    if c in df_show.columns:
+        df_show[c] = df_show[c].map(lambda v: fmt_money(float(v)))
+st.dataframe(df_show, use_container_width=True)
         st.dataframe(df.tail(24), use_container_width=True)
         st.download_button("Download taxable CSV", df.to_csv(index=False).encode("utf-8"), "taxable.csv", "text/csv")
 
@@ -159,6 +201,11 @@ with tabs[2]:
     if df is None:
         st.info("Run the model first (default PPVA fees).")
     else:
+        df_show = df.tail(24).copy()
+for c in ["value_start", "value_end", "basis", "tax_paid"]:
+    if c in df_show.columns:
+        df_show[c] = df_show[c].map(lambda v: fmt_money(float(v)))
+st.dataframe(df_show, use_container_width=True)
         st.dataframe(df.tail(24), use_container_width=True)
         st.download_button("Download PPVA CSV", df.to_csv(index=False).encode("utf-8"), "ppva_accum.csv", "text/csv")
 
@@ -168,5 +215,10 @@ with tabs[3]:
     if df is None:
         st.info("Run the model first.")
     else:
+        df_show = df.tail(24).copy()
+for c in ["value_start", "value_end", "basis", "tax_paid"]:
+    if c in df_show.columns:
+        df_show[c] = df_show[c].map(lambda v: fmt_money(float(v)))
+st.dataframe(df_show, use_container_width=True)
         st.dataframe(df.tail(24), use_container_width=True)
         st.download_button("Download PPLI CSV", df.to_csv(index=False).encode("utf-8"), "ppli.csv", "text/csv")
