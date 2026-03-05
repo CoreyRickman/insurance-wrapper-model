@@ -186,7 +186,234 @@ def run_once(seed: int):
         loan_crediting_rate=float(ppli_ss["loan_crediting_rate"]),
         is_mec=bool(ppli_ss["is_mec"]),
     )
+def _end_of_year_rows(df: pd.DataFrame, years: int) -> pd.DataFrame:
+    """
+    Return end-of-year rows (month 12,24,...) from a monthly df that has 'month'.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    d = df.copy()
+    # month is 1..N
+    d["year"] = ((d["month"].astype(int) - 1) // 12) + 1
+    # take last row in each year (end-of-year)
+    eoy = d.sort_values("month").groupby("year", as_index=False).tail(1).reset_index(drop=True)
+    # keep only years 1..years
+    return eoy[eoy["year"].between(1, years)].reset_index(drop=True)
 
+
+def build_yearly_compare_frames(results: dict, years: int, issue_age: int, taxes: TaxInputs):
+    """
+    Builds:
+      - chart_df: annual series for plotting (Age index)
+      - metrics_df: executive summary table
+    Uses definitions:
+      Taxable after-tax = liquidate each year-end
+      PPVA after-tax = surrender each year-end (ordinary on gains)
+      PPLI after-tax/benefit = cumulative loans + (DB - loan balance) at each year-end
+    """
+    # --- end-of-year rows ---
+    tx_eoy = _end_of_year_rows(results.get("Taxable"), years)
+    ppva_eoy = _end_of_year_rows(results.get("PPVA"), years)
+    ppli_eoy = _end_of_year_rows(results.get("PPLI"), years)
+
+    ages = pd.Series([issue_age + y for y in range(1, years + 1)], name="Age")
+    chart = pd.DataFrame({"Age": ages})
+
+    # --- Taxable series ---
+    if not tx_eoy.empty:
+        pre_vals = tx_eoy["value_end"].astype(float).to_numpy()
+        basis = tx_eoy["basis"].astype(float).to_numpy()
+
+        after_vals = []
+        for v, b in zip(pre_vals, basis):
+            aft, _ = liquidate_taxable(float(v), float(b), taxes)
+            after_vals.append(float(aft))
+
+        chart["Taxable (Pre-tax)"] = pre_vals
+        chart["Taxable (After-tax liquidation)"] = np.array(after_vals, dtype=float)
+
+        # annual taxes paid (sum within year)
+        tx = results["Taxable"].copy()
+        tx["year"] = ((tx["month"].astype(int) - 1) // 12) + 1
+        taxes_by_year = tx.groupby("year")["tax_paid"].sum().reindex(range(1, years + 1)).fillna(0.0).to_numpy()
+        chart["Taxable taxes (annual)"] = taxes_by_year
+
+    # --- PPVA series ---
+    if not ppva_eoy.empty:
+        pre_vals = ppva_eoy["value_end"].astype(float).to_numpy()
+        basis = ppva_eoy["basis"].astype(float).to_numpy()
+
+        after_vals = []
+        for v, b in zip(pre_vals, basis):
+            aft, _ = liquidate_ppva(float(v), float(b), taxes)
+            after_vals.append(float(aft))
+
+        chart["PPVA (Pre-tax CV)"] = pre_vals
+        chart["PPVA (After-tax surrender)"] = np.array(after_vals, dtype=float)
+
+        # annual net cash to client (if withdrawals modeled)
+        pp = results["PPVA"].copy()
+        pp["year"] = ((pp["month"].astype(int) - 1) // 12) + 1
+        if "withdraw_net_cash" in pp.columns:
+            w_by_year = pp.groupby("year")["withdraw_net_cash"].sum().reindex(range(1, years + 1)).fillna(0.0).to_numpy()
+            chart["PPVA cashflows (annual)"] = w_by_year
+        else:
+            chart["PPVA cashflows (annual)"] = 0.0
+
+        # annual tax paid inside PPVA model if available (usually 0 unless withdrawals/penalty)
+        if "tax" in pp.columns:
+            pp_tax_by_year = pp.groupby("year")["tax"].sum().reindex(range(1, years + 1)).fillna(0.0).to_numpy()
+            chart["PPVA taxes (annual)"] = pp_tax_by_year
+        else:
+            chart["PPVA taxes (annual)"] = 0.0
+
+    # --- PPLI series ---
+    if not ppli_eoy.empty:
+        # pre-tax CV
+        chart["PPLI (Pre-tax CV)"] = ppli_eoy["cash_value_end"].astype(float).to_numpy()
+
+        # cumulative loans and net DB at each year-end
+        pl = results["PPLI"].copy()
+        pl["year"] = ((pl["month"].astype(int) - 1) // 12) + 1
+
+        loans_cum = []
+        benefit = []
+        for y in range(1, years + 1):
+            yr_rows = pl[pl["year"] <= y]
+            loans_to_date = float(yr_rows["loan_gross"].sum()) if "loan_gross" in yr_rows.columns else 0.0
+
+            eoy_row = ppli_eoy[ppli_eoy["year"] == y]
+            if not eoy_row.empty:
+                db = float(eoy_row["death_benefit"].iloc[0])
+                loan_bal = float(eoy_row["loan_balance"].iloc[0])
+                net_db = max(0.0, db - loan_bal)
+            else:
+                net_db = 0.0
+
+            loans_cum.append(loans_to_date)
+            benefit.append(loans_to_date + net_db)
+
+        chart["PPLI loans (cumulative)"] = np.array(loans_cum, dtype=float)
+        chart["PPLI total benefit (loans + net DB)"] = np.array(benefit, dtype=float)
+
+        # annual loan proceeds
+        if "loan_gross" in pl.columns:
+            loan_by_year = pl.groupby("year")["loan_gross"].sum().reindex(range(1, years + 1)).fillna(0.0).to_numpy()
+            chart["PPLI cashflows (annual)"] = loan_by_year
+        else:
+            chart["PPLI cashflows (annual)"] = 0.0
+
+        # annual tax on loans if MEC
+        if "loan_tax" in pl.columns:
+            loan_tax_by_year = pl.groupby("year")["loan_tax"].sum().reindex(range(1, years + 1)).fillna(0.0).to_numpy()
+            chart["PPLI taxes (annual)"] = loan_tax_by_year
+        else:
+            chart["PPLI taxes (annual)"] = 0.0
+
+    # ---------------- Executive metrics table (horizon) ----------------
+    def _cagr(start, end, years):
+        if start <= 0 or end <= 0:
+            return None
+        return (end / start) ** (1 / years) - 1
+
+    # compute final after-tax values at horizon (year=years)
+    def _get_taxable_final():
+        if tx_eoy.empty:
+            return None
+        v = float(tx_eoy[tx_eoy["year"] == years]["value_end"].iloc[0])
+        b = float(tx_eoy[tx_eoy["year"] == years]["basis"].iloc[0])
+        aft, exit_tax = liquidate_taxable(v, b, taxes)
+        total_tax = float(results["Taxable"]["tax_paid"].sum()) + float(exit_tax)
+        return float(v), float(aft), total_tax
+
+    def _get_ppva_final():
+        if ppva_eoy.empty:
+            return None
+        v = float(ppva_eoy[ppva_eoy["year"] == years]["value_end"].iloc[0])
+        b = float(ppva_eoy[ppva_eoy["year"] == years]["basis"].iloc[0])
+        aft, exit_tax = liquidate_ppva(v, b, taxes)
+        # if model has internal tax column, include; otherwise 0 + exit
+        pp = results["PPVA"]
+        internal_tax = float(pp["tax"].sum()) if (pp is not None and "tax" in pp.columns) else 0.0
+        total_tax = internal_tax + float(exit_tax)
+        return float(v), float(aft), total_tax
+
+    def _get_ppli_final():
+        if ppli_eoy.empty:
+            return None
+        # define horizon "after-tax value" as total benefit at horizon
+        # = cumulative loans + net DB at horizon year-end
+        y = years
+        pl = results["PPLI"].copy()
+        pl["year"] = ((pl["month"].astype(int) - 1) // 12) + 1
+        loans = float(pl[pl["year"] <= y]["loan_gross"].sum()) if "loan_gross" in pl.columns else 0.0
+
+        row = ppli_eoy[ppli_eoy["year"] == y].iloc[0]
+        cv = float(row["cash_value_end"])
+        db = float(row["death_benefit"])
+        loan_bal = float(row["loan_balance"])
+        net_db = max(0.0, db - loan_bal)
+        total_benefit = loans + net_db
+
+        # taxes in PPLI are usually only loan_tax (MEC) or lapse events; include what we have
+        total_tax = float(pl["loan_tax"].sum()) if "loan_tax" in pl.columns else 0.0
+        return cv, total_benefit, total_tax, loans, net_db
+
+    premium0 = float(st.session_state.get("base_premium", 0.0))
+
+    taxable_final = _get_taxable_final()
+    ppva_final = _get_ppva_final()
+    ppli_final = _get_ppli_final()
+
+    rows = []
+    # Taxable
+    if taxable_final is not None:
+        pre, aft, tax_total = taxable_final
+        rows.append({
+            "Scenario": "Taxable",
+            "Ending pre-tax value": pre,
+            "Ending after-tax value/benefit": aft,
+            "Total taxes (ongoing + exit)": tax_total,
+            "After-tax CAGR": _cagr(premium0, aft, years),
+        })
+    # PPVA
+    if ppva_final is not None:
+        pre, aft, tax_total = ppva_final
+        rows.append({
+            "Scenario": "PPVA",
+            "Ending pre-tax value": pre,
+            "Ending after-tax value/benefit": aft,
+            "Total taxes (ongoing + exit)": tax_total,
+            "After-tax CAGR": _cagr(premium0, aft, years),
+        })
+    # PPLI
+    if ppli_final is not None:
+        cv, benefit, tax_total, loans, net_db = ppli_final
+        rows.append({
+            "Scenario": "PPLI",
+            "Ending pre-tax value": cv,
+            "Ending after-tax value/benefit": benefit,
+            "Total taxes (ongoing + exit)": tax_total,
+            "After-tax CAGR": _cagr(premium0, benefit, years),
+            "PPLI loans received (cum)": loans,
+            "PPLI net to heirs @ horizon": net_db,
+        })
+
+    metrics = pd.DataFrame(rows)
+
+    # Add tax savings vs taxable
+    if not metrics.empty and (metrics["Scenario"] == "Taxable").any():
+        tx_aft = float(metrics.loc[metrics["Scenario"] == "Taxable", "Ending after-tax value/benefit"].iloc[0])
+        tx_tax = float(metrics.loc[metrics["Scenario"] == "Taxable", "Total taxes (ongoing + exit)"].iloc[0])
+
+        metrics["Tax savings vs Taxable ($)"] = metrics["Total taxes (ongoing + exit)"].apply(lambda x: tx_tax - float(x))
+        metrics["After-tax advantage vs Taxable ($)"] = metrics["Ending after-tax value/benefit"].apply(lambda x: float(x) - tx_aft)
+        metrics["After-tax advantage vs Taxable (%)"] = metrics["After-tax advantage vs Taxable ($)"].apply(
+            lambda x: (float(x) / tx_aft) if tx_aft > 0 else np.nan
+        )
+
+    return chart, metrics
+    
     # ---------------- Taxable ----------------
     if do_taxable:
         df_tax = run_taxable(policy, strategy, taxes, taxable_inputs, years=years, monthly_returns=r)
@@ -331,83 +558,104 @@ def run_once(seed: int):
 with tabs[0]:
     st.subheader("Compare")
 
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        view_mode = st.selectbox(
+            "Chart view",
+            ["After-tax (recommended)", "Pre-tax account values"],
+            index=0,
+            key="cmp_view_mode",
+        )
+    with c2:
+        show_cashflows = st.checkbox("Show cashflows chart", value=False, key="cmp_show_cashflows")
+    with c3:
+        st.caption("Tip: Use PPVA/PPLI tabs to change settings, then come back here and click Run.")
+
     if st.button("Run model", type="primary", key="btn_run_model_compare"):
         results, summ = run_once(int(mc_seed))
         st.session_state["results"] = results
         st.session_state["summary"] = summ
 
-    if not st.session_state["summary"].empty:
-        summ = st.session_state["summary"].copy()
+    if st.session_state["results"]:
+        years = int(horizon_years)
+        chart_df, metrics_df = build_yearly_compare_frames(
+            st.session_state["results"], years=years, issue_age=int(issue_age), taxes=taxes
+        )
 
-        # ---- Growth chart (account values) ----
-        growth = None
-        if st.session_state["results"]:
-            # pick a month index from any available df
-            base_df = None
-            for k in ["Taxable", "PPVA", "PPLI"]:
-                if k in st.session_state["results"]:
-                    base_df = st.session_state["results"][k]
-                    break
+        # -------- Hero chart (annual) --------
+        st.markdown("### Growth chart (annual)")
 
-            if base_df is not None and "month" in base_df.columns:
-                growth = pd.DataFrame({"month": base_df["month"].astype(int)})
+        plot_df = chart_df.copy()
+        plot_df = plot_df.set_index("Age")
 
-                if "Taxable" in st.session_state["results"]:
-                    growth["Taxable"] = st.session_state["results"]["Taxable"]["value_end"].astype(float)
-                if "PPVA" in st.session_state["results"]:
-                    growth["PPVA (CV)"] = st.session_state["results"]["PPVA"]["value_end"].astype(float)
-                if "PPLI" in st.session_state["results"]:
-                    growth["PPLI (CV)"] = st.session_state["results"]["PPLI"]["cash_value_end"].astype(float)
+        if view_mode == "Pre-tax account values":
+            cols = [c for c in ["Taxable (Pre-tax)", "PPVA (Pre-tax CV)", "PPLI (Pre-tax CV)"] if c in plot_df.columns]
+        else:
+            cols = [c for c in ["Taxable (After-tax liquidation)", "PPVA (After-tax surrender)", "PPLI total benefit (loans + net DB)"] if c in plot_df.columns]
 
-        if growth is not None and growth.shape[1] > 1:
-            st.markdown("### Growth chart (account values)")
-            st.line_chart(growth.set_index("month"))
+        if cols:
+            st.line_chart(plot_df[cols], height=420)
+        else:
+            st.info("Run the model and enable scenarios to see the chart.")
 
-        # ---- Format summary table ----
-        display = summ.copy()
+        # -------- Executive metrics --------
+        st.markdown("### Executive metrics (planning-grade)")
 
-        money_cols = [
-            "ending_value",
-            "ending_value_after_tax_exit",
-            "exit_tax_at_horizon",
-            "total_tax_paid",
-            "total_cashflows",
-            "tax_drag_$",
-            "ppli_loans_received",
-            "ppli_net_to_heirs",
-            "ppli_total_benefit",
-        ]
-        pct_cols = ["pre_tax_cagr", "after_tax_cagr", "irr_annual", "tax_drag_%_of_end"]
+        if not metrics_df.empty:
+            display = metrics_df.copy()
 
-        for c in money_cols:
-            if c in display.columns:
-                display[c] = display[c].map(lambda v: fmt_money(float(v)) if pd.notnull(v) else "")
+            money_cols = [
+                "Ending pre-tax value",
+                "Ending after-tax value/benefit",
+                "Total taxes (ongoing + exit)",
+                "Tax savings vs Taxable ($)",
+                "After-tax advantage vs Taxable ($)",
+                "PPLI loans received (cum)",
+                "PPLI net to heirs @ horizon",
+            ]
+            pct_cols = ["After-tax CAGR", "After-tax advantage vs Taxable (%)"]
 
-        for c in pct_cols:
-            if c in display.columns:
-                display[c] = display[c].map(lambda v: f"{100*float(v):.2f}%" if (pd.notnull(v) and v is not None) else "")
+            for c in money_cols:
+                if c in display.columns:
+                    display[c] = display[c].map(lambda v: fmt_money(float(v)) if pd.notnull(v) else "")
 
-        rename_map = {
-            "ending_value": "Ending value (pre-tax)",
-            "ending_value_after_tax_exit": "After-tax value (Net to heirs for PPLI)",
-            "exit_tax_at_horizon": "Exit tax @ horizon",
-            "total_tax_paid": "Ongoing taxes",
-            "total_cashflows": "Cashflows to client (loans/withdrawals)",
-            "pre_tax_cagr": "Pre-tax CAGR",
-            "after_tax_cagr": "After-tax CAGR",
-            "irr_annual": "After-tax IRR",
-            "tax_drag_$": "Tax drag ($)",
-            "tax_drag_%_of_end": "Tax drag (% of end)",
-            "ppli_loans_received": "PPLI loans received",
-            "ppli_net_to_heirs": "PPLI net to heirs",
-            "ppli_total_benefit": "PPLI total benefit (loans + heirs)",
-        }
-        display = display.rename(columns={k: v for k, v in rename_map.items() if k in display.columns})
+            for c in pct_cols:
+                if c in display.columns:
+                    display[c] = display[c].map(lambda v: f"{100*float(v):.2f}%" if (pd.notnull(v) and v is not None) else "")
 
-        st.dataframe(display, use_container_width=True)
+            st.dataframe(display, use_container_width=True, hide_index=True)
 
-        st.markdown("### After-tax comparison (Net to heirs for PPLI)")
-        st.bar_chart(summ.set_index("scenario")["ending_value_after_tax_exit"])
+            # Big KPIs
+            if (metrics_df["Scenario"] == "Taxable").any():
+                tx_aft = float(metrics_df.loc[metrics_df["Scenario"] == "Taxable", "Ending after-tax value/benefit"].iloc[0])
+
+                for scen in ["PPVA", "PPLI"]:
+                    if (metrics_df["Scenario"] == scen).any():
+                        adv = float(metrics_df.loc[metrics_df["Scenario"] == scen, "After-tax advantage vs Taxable ($)"].iloc[0])
+                        pct = float(metrics_df.loc[metrics_df["Scenario"] == scen, "After-tax advantage vs Taxable (%)"].iloc[0])
+                        st.metric(f"{scen} advantage vs Taxable", fmt_money(adv), f"{pct*100:.2f}%")
+
+        else:
+            st.info("No metrics yet. Click Run model.")
+
+        # -------- Optional cashflows chart --------
+        if show_cashflows:
+            st.markdown("### Cashflows (annual)")
+            cf_cols = [c for c in ["PPVA cashflows (annual)", "PPLI cashflows (annual)"] if c in plot_df.columns]
+            if cf_cols:
+                st.bar_chart(plot_df[cf_cols], height=250)
+            else:
+                st.info("No cashflows available (withdrawals/loans may be off).")
+
+        # -------- Details / debug --------
+        with st.expander("Details (monthly schedules, for audit)", expanded=False):
+            for name in ["Taxable", "PPVA", "PPLI"]:
+                df = st.session_state["results"].get(name)
+                if df is not None:
+                    st.markdown(f"**{name} (last 24 months)**")
+                    st.dataframe(df.tail(24), use_container_width=True)
+    else:
+        st.info("Click Run model to generate results.")
 
 # ---------------- Taxable tab ----------------
 with tabs[1]:
