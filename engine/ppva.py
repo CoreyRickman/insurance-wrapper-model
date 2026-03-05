@@ -1,6 +1,5 @@
 import pandas as pd
-from .types import PolicyInputs, StrategyInputs, FeeInputs, TaxInputs, WithdrawalPlan, AnnuitizationPlan
-from .strategy import deterministic_monthly_returns
+from .types import PolicyInputs, FeeInputs, TaxInputs, WithdrawalPlan, AnnuitizationPlan
 from .fees import apply_monthly_asset_fee, monthly_rate_from_annual
 from .taxes import eff_rate_ordinary
 
@@ -13,9 +12,9 @@ def lifo_withdraw(value: float, basis: float, amt: float):
     basis2 = max(0.0, basis - nontaxable)
     return value2, basis2, taxable, nontaxable
 
-def run_ppva_accum(policy: PolicyInputs, strategy: StrategyInputs, fees: FeeInputs, years: int) -> pd.DataFrame:
+def run_ppva_accum(policy: PolicyInputs, fees: FeeInputs, years: int, monthly_returns) -> pd.DataFrame:
     months = years * 12
-    r = deterministic_monthly_returns(strategy, months)
+    r = monthly_returns
 
     value = policy.premium * (1 - policy.premium_load)
     basis = policy.premium
@@ -52,7 +51,6 @@ def apply_ppva_withdrawals(df: pd.DataFrame, plan: WithdrawalPlan, taxes: TaxInp
     start_m = int(max(1, (plan.start_age - out["age"].iloc[0]) * 12 + 1))
     end_m = int(min(len(out), (plan.end_age - out["age"].iloc[0]) * 12 + 1))
 
-    value = float(out.loc[0, "value_end"])
     basis = float(out.loc[0, "basis"])
 
     for i in range(len(out)):
