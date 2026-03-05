@@ -1,6 +1,6 @@
 import pandas as pd
 from .types import PolicyInputs, StrategyInputs, TaxInputs, TaxableInputs
-from .strategy import deterministic_monthly_returns, annual_tax_buckets
+from .strategy import annual_tax_buckets
 from .taxes import eff_rate_ordinary, eff_rate_qdiv, eff_rate_stcg, eff_rate_ltcg
 from .fees import bps_to_rate
 
@@ -8,9 +8,10 @@ def run_taxable(policy: PolicyInputs,
                 strategy: StrategyInputs,
                 taxes: TaxInputs,
                 taxable: TaxableInputs,
-                years: int) -> pd.DataFrame:
+                years: int,
+                monthly_returns) -> pd.DataFrame:
     months = years * 12
-    r = deterministic_monthly_returns(strategy, months)
+    r = monthly_returns
     buckets = annual_tax_buckets(strategy)
 
     value = policy.premium * (1 - policy.premium_load)
