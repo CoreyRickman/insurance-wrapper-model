@@ -10,6 +10,7 @@ from engine.ppva import run_ppva_accum, apply_ppva_withdrawals, ppva_annuitize_p
 from engine.ppli import run_ppli
 from engine.metrics import summarize_path
 from engine.liquidation import liquidate_taxable, liquidate_ppva
+from engine.formatting import fmt_money, fmt_money2, fmt_pct
 
 st.set_page_config(page_title="Taxable vs PPVA vs PPLI (Planning)", layout="wide")
 st.title("Taxable vs PPVA vs PPLI — Planning-Grade Model")
