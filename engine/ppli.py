@@ -1,6 +1,5 @@
 import pandas as pd
-from .types import PolicyInputs, StrategyInputs, TaxInputs, PPLIInputs
-from .strategy import deterministic_monthly_returns
+from .types import PolicyInputs, TaxInputs, PPLIInputs
 from .fees import apply_monthly_asset_fee, monthly_rate_from_annual
 from .taxes import eff_rate_ordinary
 
@@ -26,13 +25,13 @@ def _death_benefit(cash_value: float, face: float, corridor: float, option: str)
     return max(face, corridor * cash_value)
 
 def run_ppli(policy: PolicyInputs,
-             strategy: StrategyInputs,
              taxes: TaxInputs,
              ppli: PPLIInputs,
              years: int,
+             monthly_returns,
              assumed_face: float = None) -> pd.DataFrame:
     months = years * 12
-    r = deterministic_monthly_returns(strategy, months)
+    r = monthly_returns
 
     cash_value = policy.premium * (1 - ppli.premium_load)
     basis = policy.premium
