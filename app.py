@@ -155,13 +155,20 @@ def run_once(seed: int):
     results = {}
     summary_rows = []
 
-  step_up = st.checkbox("Step-up at death (taxable)", value=False, key="tx_stepup")
-    death_age = st.number_input("Assumed death age (taxable)", value=int(issue_age) + int(horizon_years), step=1, key="tx_death_age")
-    taxable_inputs = TaxableInputs(
-    step_up_at_death=bool(step_up),
-    death_age=int(death_age) if step_up else None,
-    tlh_bps=0.0,
-)
+      st.header("Taxable liquidation assumptions")
+
+    step_up = st.checkbox(
+        "Step-up at death (taxable)",
+        value=False,
+        key="tx_stepup"
+    )
+
+    death_age = st.number_input(
+        "Assumed death age (taxable)",
+        value=int(issue_age) + int(horizon_years),
+        step=1,
+        key="tx_death_age"
+    )
 
     # ---- PPVA from session_state ----
     ppva_ss = st.session_state["ppva_cfg"]
