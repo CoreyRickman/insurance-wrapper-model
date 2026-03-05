@@ -93,15 +93,19 @@ with tabs[0]:
         summaries = []
 
        if do_taxable:
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        step_up = st.checkbox("Step-up at death", value=True, key="tx_stepup")
-    with c2:
-        death_age = st.number_input("Death age (for step-up)", value=90, step=1, key="tx_death_age")
-    with c3:
-        tlh = st.number_input("Tax-loss harvesting benefit (bps/yr)", value=0.0, key="tx_tlh")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            step_up = st.checkbox("Step-up at death", value=True, key="tx_stepup")
+        with c2:
+            death_age = st.number_input("Death age (for step-up)", value=90, step=1, key="tx_death_age")
+        with c3:
+            tlh = st.number_input("Tax-loss harvesting benefit (bps/yr)", value=0.0, key="tx_tlh")
 
-    taxable_inputs = TaxableInputs(step_up_at_death=step_up, death_age=int(death_age), tlh_bps=float(tlh))
+    taxable_inputs = TaxableInputs(
+        step_up_at_death=step_up, 
+        death_age=int(death_age), 
+        tlh_bps=float(tlh)
+    )
     df_tax = run_taxable(policy, strategy, taxes, taxable_inputs, years=int(horizon_years))
     results["Taxable"] = df_tax
 
