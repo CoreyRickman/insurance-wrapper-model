@@ -33,11 +33,14 @@ def run_taxable(policy: PolicyInputs,
         age = policy.issue_age + (m-1)/12.0
         v_start = value
 
+        # grow by total return
         value = max(0.0, value * (1 + r[m-1]))
         tax = 0.0
+        value_gross_end = value  # before paying annual taxes
 
         if m % 12 == 0:
             start_nav = v_start
+
             tax += start_nav * buckets["ordinary"] * ord_r
             tax += start_nav * buckets["qdiv"] * qd_r
             tax += start_nav * buckets["stcg"] * st_r
@@ -46,15 +49,17 @@ def run_taxable(policy: PolicyInputs,
             tax = max(0.0, tax - (start_nav * tlh_rate))
             value = max(0.0, value - tax)
 
-            basis += start_nav * (buckets["ordinary"] + buckets["qdiv"])
+            # Basis increases by *all* realized/distributed components assumed taxed annually
+            basis += start_nav * (buckets["ordinary"] + buckets["qdiv"] + buckets["stcg"] + buckets["ltcg"])
 
         if death_month is not None and m == death_month:
-            basis = value
+            basis = value  # step-up
 
         rows.append({
             "month": m,
             "age": age,
             "value_start": v_start,
+            "value_gross_end": value_gross_end,
             "value_end": value,
             "basis": basis,
             "tax_paid": tax,
